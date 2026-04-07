@@ -1,0 +1,181 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# DEMO: Main Pipeline — Orchestrator
+#
+# This workflow demonstrates calling multiple reusable workflows in sequence,
+# passing outputs between them, and using `secrets: inherit`.
+#
+# It showcases the November 2025 GitHub Actions enhancement:
+#   • Up to 50 reusable workflow calls per run (was 20)
+#   • Up to 10 levels of nesting (was 4)
+#
+# Trigger this manually from the Actions tab, or it runs automatically
+# on push to main / on pull requests to main.
+# ──────────────────────────────────────────────────────────────────────────────
+name: "Demo: Main Pipeline (Orchestrator)"
+
+on:
+  # ── Manual trigger with input parameters ──────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: choice
+        options: ["18", "20", "21", "22"]
+        default: "20"
+      run-tests:
+        description: "Run tests in CI?"
+        type: boolean
+        default: true
+      deploy-environment:
+        description: "Deployment target environment"
+        type: choice
+        options: ["dev", "staging", "prod"]
+        default: "dev"
+      fail-on-security-finding:
+        description: "Fail the pipeline on security findings?"
+        type: boolean
+        default: false   # Set to false so the demo always completes
+
+  # ── Automatic triggers ────────────────────────────────────────────────────
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 1: CI — Build & Test
+  #
+  # Calls the reusable CI workflow with inputs.
+  # Exposes outputs (build-version, artifact-name) for downstream jobs.
+  # ════════════════════════════════════════════════════════════════════════════
+  ci:
+    name: "CI — Build & Test"
+    permissions: {}
+    uses: ./.github/workflows/reusable-ci.yml
+    with:
+      node-version: ${{ inputs.node-version || '20' }}
+      run-tests: ${{ inputs.run-tests == null || inputs.run-tests == true }}
+    # `secrets: inherit` passes ALL secrets from this workflow to the reusable one.
+    # Only works within the same owner/organization.
+    secrets: inherit
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 2: Security Scan
+  #
+  # Runs after CI succeeds.
+  # Receives the artifact-name output from the CI job.
+  # ════════════════════════════════════════════════════════════════════════════
+  security:
+    name: "Security Scan"
+    needs: [ci]
+    permissions: {}
+    uses: ./.github/workflows/reusable-security-scan.yml
+    with:
+      artifact-name: ${{ needs.ci.outputs.artifact-name }}
+      severity-threshold: "high"
+      fail-on-finding: ${{ inputs.fail-on-security-finding == true }}
+      scan-dependencies: true
+      scan-code: true
+    secrets: inherit
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 3: Deploy to Dev
+  #
+  # Runs after BOTH CI and Security pass.
+  # Uses outputs from CI (artifact-name, build-version) as inputs.
+  # Uses outputs from Security (scan-passed) as a gate (via `needs`).
+  # ════════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: "Deploy"
+    needs: [ci, security]
+    permissions: {}
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: ${{ inputs.deploy-environment || 'dev' }}
+      artifact-name: ${{ needs.ci.outputs.artifact-name }}
+      build-version: ${{ needs.ci.outputs.build-version }}
+      dry-run: false
+    secrets: inherit
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 4: Pipeline Summary
+  #
+  # This job collects outputs from all reusable workflows and prints a summary.
+  # It shows how outputs flow between reusable workflows.
+  # ════════════════════════════════════════════════════════════════════════════
+  summary:
+    name: "Pipeline Summary"
+    needs: [ci, security, deploy]
+    runs-on: ubuntu-latest
+    permissions: {}
+    if: always()   # Always run the summary, even if earlier jobs failed
+
+    steps:
+      - name: Print pipeline summary
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║           GitHub Actions Pipeline Summary                 ║"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║  Feature: Reusable Workflows (Nov 2025 — new limits!)    ║"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║  CI Results                                               ║"
+          echo "║    Status         : ${{ needs.ci.result }}"
+          echo "║    Build Version  : ${{ needs.ci.outputs.build-version }}"
+          echo "║    Artifact Name  : ${{ needs.ci.outputs.artifact-name }}"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║  Security Scan Results                                    ║"
+          echo "║    Status         : ${{ needs.security.result }}"
+          echo "║    Findings Count : ${{ needs.security.outputs.findings-count }}"
+          echo "║    Scan Passed    : ${{ needs.security.outputs.scan-passed }}"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║  Deployment Results                                       ║"
+          echo "║    Status         : ${{ needs.deploy.result }}"
+          echo "║    Deployment URL : ${{ needs.deploy.outputs.deployment-url }}"
+          echo "║    Deployment ID  : ${{ needs.deploy.outputs.deployment-id }}"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo ""
+
+      - name: Write job summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🔄 GitHub Actions: Reusable Workflows Demo
+
+          > This pipeline demonstrates **Reusable Workflows** — a GitHub Actions feature enhanced in November 2025
+          > with increased limits: **10 nesting levels** (was 4) and **50 calls per run** (was 20).
+
+          ### Pipeline Results
+
+          | Job | Status | Key Output |
+          |-----|--------|-----------|
+          | CI — Build & Test | ${{ needs.ci.result }} | Version: `${{ needs.ci.outputs.build-version }}` |
+          | Security Scan | ${{ needs.security.result }} | Findings: `${{ needs.security.outputs.findings-count }}` |
+          | Deploy | ${{ needs.deploy.result }} | URL: `${{ needs.deploy.outputs.deployment-url }}` |
+
+          ### How This Works
+
+          Each job in this orchestrator calls a **reusable workflow** using `uses:`:
+
+          ```yaml
+          ci:
+            uses: ./.github/workflows/reusable-ci.yml
+            with:
+              node-version: "20"
+            secrets: inherit
+          ```
+
+          Outputs from `ci` flow into `deploy`:
+          ```yaml
+          deploy:
+            needs: [ci, security]
+            uses: ./.github/workflows/reusable-deploy.yml
+            with:
+              artifact-name: ${{ needs.ci.outputs.artifact-name }}
+              build-version:  ${{ needs.ci.outputs.build-version }}
+          ```
+
+          ### Resources
+          - 📖 [Docs: Reusing Workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+          - 📣 [Nov 2025 Changelog: New Limits](https://github.blog/changelog/2025-11-06-new-releases-for-github-actions-november-2025/)
+          EOF

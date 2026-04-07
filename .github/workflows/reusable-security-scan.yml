@@ -1,0 +1,164 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# REUSABLE WORKFLOW: Security Scan
+#
+# This workflow is called by other workflows using:
+#
+#   jobs:
+#     security:
+#       uses: ./.github/workflows/reusable-security-scan.yml
+#       with:
+#         artifact-name: ${{ needs.ci.outputs.artifact-name }}
+#         severity-threshold: "high"
+#         fail-on-finding: true
+#       secrets: inherit
+#
+# It demonstrates:
+#   - Receiving outputs from a previous reusable workflow (artifact-name)
+#   - Conditional failure based on input flags
+#   - Centralized security policy — enforced org-wide from one place
+# ──────────────────────────────────────────────────────────────────────────────
+name: "Reusable: Security Scan"
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the build artifact to scan (from reusable-ci.yml output)"
+        type: string
+        required: false
+        default: ""
+      severity-threshold:
+        description: "Minimum severity level that triggers a finding: low | medium | high | critical"
+        type: string
+        required: false
+        default: "high"
+      fail-on-finding:
+        description: "Whether the workflow should fail when findings meet the severity threshold"
+        type: boolean
+        required: false
+        default: true
+      scan-dependencies:
+        description: "Whether to scan npm/pip dependencies for known vulnerabilities"
+        type: boolean
+        required: false
+        default: true
+      scan-code:
+        description: "Whether to run static analysis (SAST) on the source code"
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      findings-count:
+        description: "Number of security findings at or above the severity threshold"
+        value: ${{ jobs.scan.outputs.findings-count }}
+      scan-passed:
+        description: "true if the scan passed (no findings above threshold)"
+        value: ${{ jobs.scan.outputs.scan-passed }}
+
+jobs:
+  scan:
+    name: "Security Scan (threshold: ${{ inputs.severity-threshold }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      findings-count: ${{ steps.summarize.outputs.findings-count }}
+      scan-passed: ${{ steps.summarize.outputs.scan-passed }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Download build artifact (if provided) ─────────────────────────────
+      - name: Download build artifact
+        if: inputs.artifact-name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ./dist
+        continue-on-error: true   # Artifact may not exist in demo mode
+
+      # ── 3. Dependency vulnerability scan ─────────────────────────────────────
+      - name: Scan dependencies for vulnerabilities
+        id: dep-scan
+        if: inputs.scan-dependencies == true
+        run: |
+          echo "🔍 Scanning dependencies for known vulnerabilities..."
+          echo "   Severity threshold: ${{ inputs.severity-threshold }}"
+
+          if [ -f package.json ]; then
+            # Run npm audit and capture the exit code
+            npm audit --audit-level=${{ inputs.severity-threshold }} \
+              --json 2>/dev/null | tee /tmp/audit-results.json || true
+
+            VULN_COUNT=$(cat /tmp/audit-results.json 2>/dev/null \
+              | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); \
+                         console.log(d.metadata?.vulnerabilities?.total || 0)" \
+              2>/dev/null || echo "0")
+          else
+            echo "   No package.json found — simulating scan (demo mode)"
+            VULN_COUNT=0
+          fi
+
+          echo "dep-vuln-count=$VULN_COUNT" >> "$GITHUB_OUTPUT"
+          echo "   Found $VULN_COUNT dependency vulnerabilities."
+
+      # ── 4. Static code analysis ───────────────────────────────────────────────
+      - name: Static code analysis (SAST)
+        id: sast-scan
+        if: inputs.scan-code == true
+        run: |
+          echo "🔍 Running static code analysis..."
+
+          # In a real pipeline this would invoke CodeQL, Semgrep, Snyk, etc.
+          # For demo purposes we simulate the scan result.
+          SAST_FINDINGS=0
+          echo "   Static analysis complete. Findings: $SAST_FINDINGS"
+          echo "sast-findings=$SAST_FINDINGS" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Secret detection ───────────────────────────────────────────────────
+      - name: Secret detection scan
+        run: |
+          echo "🔍 Scanning for accidentally committed secrets..."
+
+          # In production use: truffleHog, gitleaks, or GitHub's native secret scanning
+          SECRET_FINDINGS=0
+          echo "   Secret detection complete. Findings: $SECRET_FINDINGS"
+
+      # ── 6. Summarize results ──────────────────────────────────────────────────
+      - name: Summarize scan results
+        id: summarize
+        run: |
+          DEP_COUNT="${{ steps.dep-scan.outputs.dep-vuln-count || '0' }}"
+          SAST_COUNT="${{ steps.sast-scan.outputs.sast-findings || '0' }}"
+          TOTAL_FINDINGS=$((DEP_COUNT + SAST_COUNT))
+
+          echo ""
+          echo "════════════════════════════════════"
+          echo "  Security Scan Summary"
+          echo "════════════════════════════════════"
+          echo "  Dependency vulnerabilities : $DEP_COUNT"
+          echo "  SAST findings              : $SAST_COUNT"
+          echo "  ─────────────────────────────────"
+          echo "  Total findings             : $TOTAL_FINDINGS"
+          echo "  Severity threshold         : ${{ inputs.severity-threshold }}"
+          echo "  Fail on finding            : ${{ inputs.fail-on-finding }}"
+          echo "════════════════════════════════════"
+
+          echo "findings-count=$TOTAL_FINDINGS" >> "$GITHUB_OUTPUT"
+
+          if [ "$TOTAL_FINDINGS" -eq 0 ]; then
+            echo "✅ Security scan PASSED — no findings above threshold."
+            echo "scan-passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️  Security scan found $TOTAL_FINDINGS issue(s)."
+            echo "scan-passed=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.fail-on-finding }}" = "true" ]; then
+              echo "❌ Failing workflow because fail-on-finding=true"
+              exit 1
+            else
+              echo "⚠️  Continuing because fail-on-finding=false"
+            fi
+          fi
