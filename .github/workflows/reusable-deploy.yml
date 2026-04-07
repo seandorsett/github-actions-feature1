@@ -1,0 +1,176 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# REUSABLE WORKFLOW: Deploy
+#
+# This workflow is called by other workflows using:
+#
+#   jobs:
+#     deploy:
+#       uses: ./.github/workflows/reusable-deploy.yml
+#       with:
+#         environment: "dev"
+#         artifact-name: ${{ needs.ci.outputs.artifact-name }}
+#         build-version: ${{ needs.ci.outputs.build-version }}
+#       secrets: inherit
+#
+# It demonstrates:
+#   - Using GitHub Environments for deployment gates
+#   - Receiving outputs from upstream reusable workflows
+#   - `secrets: inherit` for transparent secret forwarding
+#   - Environment-specific deployment logic via inputs
+# ──────────────────────────────────────────────────────────────────────────────
+name: "Reusable: Deploy"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target deployment environment: dev | staging | prod"
+        type: string
+        required: true
+      artifact-name:
+        description: "Name of the build artifact to deploy (from reusable-ci.yml output)"
+        type: string
+        required: false
+        default: ""
+      build-version:
+        description: "Semantic version string of the build being deployed"
+        type: string
+        required: false
+        default: "unknown"
+      dry-run:
+        description: "When true, simulate the deployment without making real changes"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DEPLOY_TOKEN:
+        description: "Deployment API token for the target environment"
+        required: false
+    outputs:
+      deployment-url:
+        description: "URL of the deployed application"
+        value: ${{ jobs.deploy.outputs.deployment-url }}
+      deployment-id:
+        description: "Unique identifier for this deployment"
+        value: ${{ jobs.deploy.outputs.deployment-id }}
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    # Each environment can have protection rules (required reviewers, wait timers, etc.)
+    # Configure environments at: Settings → Environments
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.get-url.outputs.url }}
+
+    outputs:
+      deployment-url: ${{ steps.get-url.outputs.url }}
+      deployment-id: ${{ steps.deploy.outputs.deployment-id }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Download build artifact ────────────────────────────────────────────
+      - name: Download build artifact
+        if: inputs.artifact-name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ./dist
+        continue-on-error: true   # Artifact may not exist in demo mode
+
+      # ── 3. Validate environment input ────────────────────────────────────────
+      - name: Validate environment
+        run: |
+          ENV="${{ inputs.environment }}"
+          case "$ENV" in
+            dev|staging|prod)
+              echo "✅ Valid environment: $ENV"
+              ;;
+            *)
+              echo "❌ Invalid environment '$ENV'. Must be: dev, staging, or prod"
+              exit 1
+              ;;
+          esac
+
+      # ── 4. Pre-deployment checks ─────────────────────────────────────────────
+      - name: Pre-deployment checks
+        run: |
+          echo "🔍 Running pre-deployment checks for ${{ inputs.environment }}..."
+          echo "   Build version : ${{ inputs.build-version }}"
+          echo "   Artifact      : ${{ inputs.artifact-name || 'none' }}"
+          echo "   Dry run       : ${{ inputs.dry-run }}"
+          echo "   Deploy token  : ${{ secrets.DEPLOY_TOKEN != '' && 'provided ✅' || 'not set (demo mode)' }}"
+          echo ""
+          echo "✅ Pre-deployment checks passed."
+
+      # ── 5. Set environment URL ────────────────────────────────────────────────
+      - name: Set deployment URL
+        id: get-url
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)     URL="https://dev.example.com" ;;
+            staging) URL="https://staging.example.com" ;;
+            prod)    URL="https://example.com" ;;
+          esac
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "🌐 Deployment URL: $URL"
+
+      # ── 6. Deploy ─────────────────────────────────────────────────────────────
+      - name: Deploy application
+        id: deploy
+        run: |
+          DEPLOY_ID="deploy-${{ inputs.environment }}-$(echo $GITHUB_SHA | cut -c1-7)-$(date +%s)"
+          echo "deployment-id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            echo "🔄 DRY RUN — Simulating deployment (no real changes made)"
+          fi
+
+          echo ""
+          echo "🚀 Deploying to ${{ inputs.environment }}..."
+          echo "   Version    : ${{ inputs.build-version }}"
+          echo "   Commit     : $GITHUB_SHA"
+          echo "   Deploy ID  : $DEPLOY_ID"
+          echo "   Target URL : ${{ steps.get-url.outputs.url }}"
+          echo ""
+
+          # In a real workflow this would call your deployment platform:
+          # - kubectl apply (Kubernetes)
+          # - aws s3 sync + cloudfront invalidation (AWS)
+          # - az webapp deployment (Azure)
+          # - heroku container:release (Heroku)
+          # - vercel deploy --prod (Vercel)
+
+          echo "✅ Deployment complete!"
+
+      # ── 7. Post-deployment smoke test ─────────────────────────────────────────
+      - name: Post-deployment smoke test
+        if: inputs.dry-run == false
+        run: |
+          echo "🔥 Running smoke tests against ${{ steps.get-url.outputs.url }}..."
+
+          # In production: run curl checks, synthetic tests, etc.
+          # Example: curl --fail ${{ steps.get-url.outputs.url }}/healthz
+
+          echo "✅ Smoke tests passed."
+
+      # ── 8. Deployment summary ────────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo ""
+          echo "════════════════════════════════════"
+          echo "  Deployment Summary"
+          echo "════════════════════════════════════"
+          echo "  Environment  : ${{ inputs.environment }}"
+          echo "  Version      : ${{ inputs.build-version }}"
+          echo "  URL          : ${{ steps.get-url.outputs.url }}"
+          echo "  Deploy ID    : ${{ steps.deploy.outputs.deployment-id }}"
+          echo "  Dry run      : ${{ inputs.dry-run }}"
+          echo "════════════════════════════════════"

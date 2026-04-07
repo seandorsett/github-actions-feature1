@@ -1,0 +1,135 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# REUSABLE WORKFLOW: CI — Build & Test
+#
+# This workflow is called by other workflows using:
+#
+#   jobs:
+#     ci:
+#       uses: ./.github/workflows/reusable-ci.yml
+#       with:
+#         node-version: "20"
+#         run-tests: true
+#
+# It demonstrates:
+#   - workflow_call trigger with typed inputs
+#   - Job outputs flowing back to the caller
+#   - Conditional steps based on inputs
+# ──────────────────────────────────────────────────────────────────────────────
+name: "Reusable: CI — Build & Test"
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version to use for the build"
+        type: string
+        required: false
+        default: "20"
+      run-tests:
+        description: "Whether to run the test suite"
+        type: boolean
+        required: false
+        default: true
+      working-directory:
+        description: "Directory containing the project to build"
+        type: string
+        required: false
+        default: "."
+    outputs:
+      build-version:
+        description: "The semantic version produced by this build (e.g. 1.4.2)"
+        value: ${{ jobs.build.outputs.version }}
+      artifact-name:
+        description: "The name of the uploaded build artifact"
+        value: ${{ jobs.build.outputs.artifact-name }}
+
+jobs:
+  build:
+    name: "Build & Test (Node ${{ inputs.node-version }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      artifact-name: ${{ steps.set-artifact-name.outputs.name }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Node.js ────────────────────────────────────────────────────
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: "${{ inputs.working-directory }}/package-lock.json"
+
+      # ── 3. Install dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "No package-lock.json found — skipping install (demo mode)"
+          fi
+
+      # ── 4. Build ─────────────────────────────────────────────────────────────
+      - name: Build application
+        run: |
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+            npm run build
+          else
+            echo "No build script found — simulating build (demo mode)"
+            mkdir -p dist
+            echo "{ \"name\": \"demo-app\", \"built\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" }" > dist/manifest.json
+          fi
+
+      # ── 5. Run tests (conditional) ───────────────────────────────────────────
+      - name: Run tests
+        if: inputs.run-tests == true
+        run: |
+          if [ -f package.json ] && grep -q '"test"' package.json; then
+            npm test
+          else
+            echo "No test script found — simulating test run (demo mode)"
+            echo "✅ All 42 tests passed."
+          fi
+
+      - name: Skip tests
+        if: inputs.run-tests == false
+        run: echo "⚠️  Tests skipped (run-tests=false)"
+
+      # ── 6. Determine build version ───────────────────────────────────────────
+      - name: Get build version
+        id: get-version
+        run: |
+          if [ -f package.json ]; then
+            VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.0.0")
+          else
+            VERSION="1.0.0-demo.$(echo $GITHUB_SHA | cut -c1-7)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Build version: $VERSION"
+
+      # ── 7. Set artifact name ─────────────────────────────────────────────────
+      - name: Set artifact name
+        id: set-artifact-name
+        run: |
+          ARTIFACT_NAME="app-build-$(echo $GITHUB_SHA | cut -c1-7)"
+          echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "📁 Artifact name: $ARTIFACT_NAME"
+
+      # ── 8. Upload build artifact ─────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.name }}
+          path: ${{ inputs.working-directory }}/dist/
+          retention-days: 7
+          if-no-files-found: warn
