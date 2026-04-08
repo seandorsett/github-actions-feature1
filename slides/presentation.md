@@ -374,11 +374,12 @@ jobs:
       id-token: write   # Required for OIDC
       contents: read
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
         with:
-          role-to-assume: ${{ inputs.aws-role-arn }}
-          aws-region: us-east-1
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           # No long-lived credentials needed! 🔐
 ```
 
